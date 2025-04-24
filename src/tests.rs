@@ -1,4 +1,49 @@
 #[cfg(test)]
+mod draw_charts {
+    use std::fs::File;
+
+    use crate::Card;
+    use std::io::Write;
+    #[test]
+    fn draw_chart_no_errors() {
+        let mut file = File::create("./plots/no-errors.txt").unwrap();
+        let mut c = Card::new();
+        let f = (0..20)
+            .map(|a| {
+                c.grade(c.get_due_timestamp().unwrap_or_default(), true);
+                (
+                    a,
+                    c.get_interval().unwrap().as_secs() as f64 / 60.0 / 60.0 / 24.0,
+                )
+            })
+            .fold(String::new(), |old, (i, v)| format!("{old}\n{i}|{v}"));
+        file.write_all(f.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn draw_chart_with_errors() {
+        let mut file = File::create("./plots/frequent-errors.txt").unwrap();
+        let mut c = Card::new();
+        let f = (0..110)
+            .map(|a| {
+                let correct = if a > 80 {
+                    true
+                } else if a > 20 {
+                    if a % 8 == 0 { false } else { true }
+                } else {
+                    if a % 15 == 0 { false } else { true }
+                };
+                c.grade(c.get_due_timestamp().unwrap_or_default() + 1, correct);
+                (
+                    a,
+                    c.get_interval().unwrap().as_secs() as f64 / 60.0 / 60.0 / 24.0,
+                )
+            })
+            .fold(String::new(), |old, (i, v)| format!("{old}\n{i}|{v}"));
+        file.write_all(f.as_bytes()).unwrap();
+    }
+}
+#[cfg(test)]
 mod test_unit {
 
     use crate::Card;
@@ -18,21 +63,21 @@ mod test_unit {
         assert_eq!(m.get_interval(), Some(Duration::from_secs(60 * 15)));
         assert_eq!(m.last_seen(), Some(orig));
 
-        let orig = m.get_due_timestamp().unwrap()+1;
+        let orig = m.get_due_timestamp().unwrap() + 1;
         m.grade(orig, true);
 
         assert_eq!(m.get_due_timestamp(), Some(orig + 60 * 15 * 4));
         assert_eq!(m.get_interval(), Some(Duration::from_secs(60 * 15 * 4)));
         assert_eq!(m.last_seen(), Some(orig));
 
-        let orig = m.get_due_timestamp().unwrap()+1;
+        let orig = m.get_due_timestamp().unwrap() + 1;
         m.grade(orig, true);
 
         assert_eq!(m.get_due_timestamp(), Some(orig + 60 * 15 * 4 * 4));
         assert_eq!(m.get_interval(), Some(Duration::from_secs(60 * 15 * 4 * 4)));
         assert_eq!(m.last_seen(), Some(orig));
 
-        let orig = m.get_due_timestamp().unwrap()+1;
+        let orig = m.get_due_timestamp().unwrap() + 1;
         m.grade(orig, true);
 
         assert_eq!(m.get_due_timestamp(), Some(orig + 60 * 15 * 4 * 4 * 4));
@@ -42,13 +87,13 @@ mod test_unit {
         );
         assert_eq!(m.last_seen(), Some(orig));
 
-        let orig = m.get_due_timestamp().unwrap()+1;
+        let orig = m.get_due_timestamp().unwrap() + 1;
         m.grade(orig, true);
 
         assert_eq!(m.get_due_timestamp(), Some(orig + 60 * 60 * 24));
         assert_eq!(m.get_interval(), Some(Duration::from_secs(60 * 60 * 24)));
         assert_eq!(m.last_seen(), Some(orig));
-        let orig = m.get_due_timestamp().unwrap()+1;
+        let orig = m.get_due_timestamp().unwrap() + 1;
         m.grade(dbg!(orig), true);
         assert_eq!(
             m.get_interval(),
@@ -56,19 +101,6 @@ mod test_unit {
         );
         assert_eq!(m.last_seen(), Some(orig));
         assert_eq!(m.get_due_timestamp(), Some(orig + 60 * 60 * 24 * 2));
-
-        
-        assert_eq!(m.get_due_timestamp(), Some(orig + 60 * 60 * 24));
-        assert_eq!(m.get_interval(), Some(Duration::from_secs(60 * 60 * 24)));
-        assert_eq!(m.last_seen(), Some(orig));
-        let orig = m.get_due_timestamp().unwrap()+1;
-        m.grade(dbg!(orig), true);
-        assert_eq!(
-            m.get_interval(),
-            Some(Duration::from_secs(60 * 60 * 24 * 2*2))
-        );
-        assert_eq!(m.last_seen(), Some(orig));
-        assert_eq!(m.get_due_timestamp(), Some(orig + 60 * 60 * 24 *2* 2));
     }
 }
 #[cfg(test)]
@@ -79,7 +111,7 @@ mod test_integration {
         sync::{LazyLock, Mutex},
     };
 
-    use crate::{Card, add_card, alloc, do_get_cards, grade_card};
+    use crate::{Card, do_get_cards};
     static MUTEX: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(true));
 
     #[test]

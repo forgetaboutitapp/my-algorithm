@@ -10,6 +10,8 @@ static CARDS_SET: LazyLock<RwLock<HashMap<u64, Card>>> =
 static WHEN_WAS_CARD_FIRST_DONE: LazyLock<RwLock<HashMap<u64, u64>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+static WHEN_WAS_CARD_DONE: LazyLock<RwLock<Vec<u64>>> = LazyLock::new(|| RwLock::new(Vec::new()));
+
 const DUE_CARD: u8 = 1;
 const NEW_CARD: u8 = 2;
 const NON_DUE_CARD: u8 = 3;
@@ -24,6 +26,8 @@ extern "C" fn add_card(id: u64) {
 
 #[unsafe(export_name = "grade-card")]
 extern "C" fn grade_card(id: u64, time: u64, correct: u64) {
+    let card_done = &*WHEN_WAS_CARD_DONE;
+    card_done.write().unwrap().push(time);
     let set = &*CARDS_SET;
     let first_done = &*WHEN_WAS_CARD_FIRST_DONE;
     {
@@ -35,6 +39,7 @@ extern "C" fn grade_card(id: u64, time: u64, correct: u64) {
     (*cards_map)
         .entry(id)
         .and_modify(|card| card.grade(time, grade));
+    *cards_map = remove_old_cards(cards_map.clone(), time);
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +68,7 @@ struct DoGetCardsReturn {
 }
 
 fn do_get_cards(n_unix: u64, cards: HashMap<u64, Card>) -> DoGetCardsReturn {
+    let cards = remove_old_cards(cards, n_unix);
     let mut new_cards: Vec<ThickCard> = vec![];
     let mut due_cards: Vec<ThickCard> = vec![];
     let mut non_due_cards: Vec<ThickCard> = vec![];
@@ -208,6 +214,48 @@ extern "C" fn init() {
     assert_eq!(c.len(), 0);
 }
 
+fn remove_old_cards(cards_map: HashMap<u64, Card>, cur_time: u64) -> HashMap<u64, Card> {
+    let new_cards = cards_map
+        .into_iter()
+        .filter_map(|(id, card)| {
+            let card: Card = card;
+            if card.is_long_term() {
+                if let Some(expected_interval) = card.get_interval() {
+                    let expected_interval: Duration = expected_interval;
+                    if let Some(last_done) = card.last_seen() {
+                        let diff = cur_time - last_done;
+                        if diff > 2 * expected_interval.as_secs() {
+                            return None;
+                        }
+                    }
+                }
+            }
+            Some((id, card))
+        })
+        .collect();
+    new_cards
+}
+
+#[unsafe(export_name = "get-when-questions-due")]
+extern "C" fn get_when_questions_due() -> u64 {
+    let set: &_ = &*CARDS_SET;
+    let cards_map: HashMap<u64, Card> = set.read().unwrap().clone();
+    let due_dates: Vec<u64> = cards_map
+        .into_iter()
+        .filter_map(|(_, card)| {
+            let card: Card = card;
+            card.get_due_timestamp()
+        })
+        .collect();
+    let my_ptr = unsafe { alloc(due_dates.len() * 8) } as *mut u8;
+    for (i, due_date) in due_dates.iter().enumerate() {
+        unsafe {
+            write_bytes(my_ptr.add(i * 8), due_date.to_le_bytes().to_vec());
+        }
+    }
+    my_ptr as u64
+}
+
 #[unsafe(export_name = "alloc")]
 unsafe extern "C" fn alloc(size: usize) -> *mut c_void {
     unsafe { malloc_rust::rust_malloc(size) }
@@ -251,6 +299,13 @@ impl Card {
         match self {
             Card::None | Card::LongTerm { .. } => false,
             Card::ShortTerm { .. } | Card::Wrong { .. } => true,
+        }
+    }
+
+    fn is_long_term(&self) -> bool {
+        match self {
+            Card::LongTerm { .. } => false,
+            Card::None | Card::ShortTerm { .. } | Card::Wrong { .. } => true,
         }
     }
     fn get_pos(&self) -> Option<u32> {
@@ -317,8 +372,7 @@ impl Card {
                     ..
                 } => {
                     // if we're not due, adjust last check and bail out
-                    let due_time =
-                        (get_interval_secs_short_term(pos)) + last_graded_check;
+                    let due_time = (get_interval_secs_short_term(pos)) + last_graded_check;
                     if due_time > time {
                         *self = Card::ShortTerm {
                             pos,
@@ -352,7 +406,8 @@ impl Card {
                     ..
                 } => {
                     let (new_pos, new_last_graded_check) = {
-                        let due_time = get_interval_secs_long_term(pos, multiplier)+last_graded_check;
+                        let due_time =
+                            get_interval_secs_long_term(pos, multiplier) + last_graded_check;
                         if due_time > time {
                             (pos, last_graded_check)
                         } else {
