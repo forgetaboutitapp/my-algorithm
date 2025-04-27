@@ -225,12 +225,12 @@ fn remove_old_cards(cards_map: HashMap<u64, Card>, cur_time: u64) -> HashMap<u64
                     if let Some(last_done) = card.last_seen() {
                         let diff = cur_time - last_done;
                         if diff > 2 * expected_interval.as_secs() {
-                            (id, Card::None)
+                            return (id, Card::None);
                         }
                     }
                 }
             }
-            Some(id, card)
+            (id, card)
         })
         .collect();
     new_cards
