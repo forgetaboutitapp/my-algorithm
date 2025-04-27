@@ -39,7 +39,7 @@ extern "C" fn grade_card(id: u64, time: u64, correct: u64) {
     (*cards_map)
         .entry(id)
         .and_modify(|card| card.grade(time, grade));
-    *cards_map = remove_old_cards(cards_map.clone(), time);
+    // *cards_map = remove_old_cards(cards_map.clone(), time);
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +68,7 @@ struct DoGetCardsReturn {
 }
 
 fn do_get_cards(n_unix: u64, cards: HashMap<u64, Card>) -> DoGetCardsReturn {
-    let cards = remove_old_cards(cards, n_unix);
+    // let cards: HashMap<u64, Card> = remove_old_cards(cards, n_unix);
     let mut new_cards: Vec<ThickCard> = vec![];
     let mut due_cards: Vec<ThickCard> = vec![];
     let mut non_due_cards: Vec<ThickCard> = vec![];
@@ -236,25 +236,25 @@ fn remove_old_cards(cards_map: HashMap<u64, Card>, cur_time: u64) -> HashMap<u64
     new_cards
 }
 
-#[unsafe(export_name = "get-when-questions-due")]
-extern "C" fn get_when_questions_due() -> u64 {
-    let set: &_ = &*CARDS_SET;
-    let cards_map: HashMap<u64, Card> = set.read().unwrap().clone();
-    let due_dates: Vec<u64> = cards_map
-        .into_iter()
-        .filter_map(|(_, card)| {
-            let card: Card = card;
-            card.get_due_timestamp()
-        })
-        .collect();
-    let my_ptr = unsafe { alloc(due_dates.len() * 8) } as *mut u8;
-    for (i, due_date) in due_dates.iter().enumerate() {
-        unsafe {
-            write_bytes(my_ptr.add(i * 8), due_date.to_le_bytes().to_vec());
-        }
-    }
-    my_ptr as u64
-}
+// #[unsafe(export_name = "get-when-questions-due")]
+// extern "C" fn get_when_questions_due() -> u64 {
+//     let set: &_ = &*CARDS_SET;
+//     let cards_map: HashMap<u64, Card> = set.read().unwrap().clone();
+//     let due_dates: Vec<u64> = cards_map
+//         .into_iter()
+//         .filter_map(|(_, card)| {
+//             let card: Card = card;
+//             card.get_due_timestamp()
+//         })
+//         .collect();
+//     let my_ptr = unsafe { alloc(due_dates.len() * 8) } as *mut u8;
+//     for (i, due_date) in due_dates.iter().enumerate() {
+//         unsafe {
+//             write_bytes(my_ptr.add(i * 8), due_date.to_le_bytes().to_vec());
+//         }
+//     }
+//     my_ptr as u64
+// }
 
 #[unsafe(export_name = "alloc")]
 unsafe extern "C" fn alloc(size: usize) -> *mut c_void {
