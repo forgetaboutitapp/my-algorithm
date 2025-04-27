@@ -217,7 +217,7 @@ extern "C" fn init() {
 fn remove_old_cards(cards_map: HashMap<u64, Card>, cur_time: u64) -> HashMap<u64, Card> {
     let new_cards = cards_map
         .into_iter()
-        .filter_map(|(id, card)| {
+        .map(|(id, card)| {
             let card: Card = card;
             if card.is_long_term() {
                 if let Some(expected_interval) = card.get_interval() {
@@ -225,12 +225,12 @@ fn remove_old_cards(cards_map: HashMap<u64, Card>, cur_time: u64) -> HashMap<u64
                     if let Some(last_done) = card.last_seen() {
                         let diff = cur_time - last_done;
                         if diff > 2 * expected_interval.as_secs() {
-                            return None;
+                            (id, Card::None)
                         }
                     }
                 }
             }
-            Some((id, card))
+            Some(id, card)
         })
         .collect();
     new_cards
