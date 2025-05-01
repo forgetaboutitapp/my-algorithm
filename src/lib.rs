@@ -1,93 +1,122 @@
-use core::{ffi::c_void, time::Duration};
-use std::{
-    collections::HashMap,
-    sync::{LazyLock, RwLock, RwLockWriteGuard},
-};
+use crate::scheduler::from_scheduler::Response;
+use crate::scheduler::response_correct::CardToView;
+use crate::scheduler::{FromScheduler, ResponseCorrect, ResponseWrong, ToScheduler};
+use core::{convert::From, ffi::c_void, time::Duration};
+use prost::Message;
+use schemars::{schema_for, JsonSchema};
+use serde::{Deserialize, Serialize};
+use std::any::Any;
+use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Deref;
 
-static CARDS_SET: LazyLock<RwLock<HashMap<u64, Card>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-static WHEN_WAS_CARD_FIRST_DONE: LazyLock<RwLock<HashMap<u64, u64>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-static WHEN_WAS_CARD_DONE: LazyLock<RwLock<Vec<u64>>> = LazyLock::new(|| RwLock::new(Vec::new()));
-
-const DUE_CARD: u8 = 1;
-const NEW_CARD: u8 = 2;
-const NON_DUE_CARD: u8 = 3;
-const ERROR_CARD: u8 = 4;
 mod tests;
 
-#[unsafe(export_name = "add-card")]
-extern "C" fn add_card(id: u64) {
-    let set = &*CARDS_SET;
-    set.write().unwrap().insert(id, Card::new());
-}
-
-#[unsafe(export_name = "grade-card")]
-extern "C" fn grade_card(id: u64, time: u64, correct: u64) {
-    let card_done = &*WHEN_WAS_CARD_DONE;
-    card_done.write().unwrap().push(time);
-    let set = &*CARDS_SET;
-    let first_done = &*WHEN_WAS_CARD_FIRST_DONE;
-    {
-        let mut first_done_map: RwLockWriteGuard<HashMap<u64, u64>> = first_done.write().unwrap();
-        (*first_done_map).entry(id).or_insert(time);
-    }
-    let mut cards_map: RwLockWriteGuard<HashMap<u64, Card>> = set.write().unwrap();
-    let grade = if correct == 0 { false } else { true };
-    (*cards_map)
-        .entry(id)
-        .and_modify(|card| card.grade(time, grade));
-    // *cards_map = remove_old_cards(cards_map.clone(), time);
+#[derive(Deserialize, Serialize, JsonSchema)]
+pub struct CustomArgs {
+    #[schemars(range(min = 0, max = 1024))]
+    /// # Max New Cards Per Day
+    /// How many new cards should one do per day (max is 1024).
+    max_amount_of_new_cards_per_day: u32,
+    #[schemars(range(min = 0, max = 23))]
+    /// # Starting Hour
+    /// At what hour of the day (where 0 is midnight and 23 is 11 PM) does the day start
+    starting_hour: u8,
 }
 
 #[derive(Debug, Clone)]
 struct ThickCard {
-    id: u64,
+    id: u32,
     last_seen: Option<u64>,
     is_short_term: bool,
     pos: Option<u32>,
 }
 
-impl PartialEq for ThickCard {
-    fn eq(&self, other: &ThickCard) -> bool {
-        self.id == other.id
+pub mod scheduler {
+    use core::{concat, env, include};
+
+    include!(concat!(env!("OUT_DIR"), "/scheduler.rs"));
+}
+type Timestamp = u64;
+type CardId = u32;
+
+#[derive(Clone, Debug)]
+struct LogSnapshot {
+    ts: Timestamp,
+    is_correct: bool,
+    id: CardId,
+}
+
+fn safe_proc_cards(
+    cards: Vec<scheduler::Card>,
+    n_unix: Timestamp,
+    custom_args: CustomArgs
+) -> ResponseCorrect {
+    let mut card_history: Vec<LogSnapshot> = Vec::new();
+    let mut available_cards: HashSet<CardId> = HashSet::new();
+    let mut when_was_card_first_done = HashMap::new();
+    for card in cards {
+        if card.is_current {
+            available_cards.insert(card.id);
+        }
+        for ts in card.card_records {
+            let when = ts.when.unwrap().seconds as Timestamp;
+
+            when_was_card_first_done
+                .entry(card.id)
+                .and_modify(|e| {
+                    if *e > when {
+                        *e = when
+                    }
+                })
+                .or_insert(when);
+
+            card_history.push(LogSnapshot {
+                ts: when as Timestamp,
+                is_correct: ts.correct,
+                id: card.id,
+            });
+        }
     }
-}
-impl Eq for ThickCard {}
+    // sort card history by chronological order, lowest to highest
+    card_history.sort_by(|a, b| b.ts.cmp(&a.ts));
 
-#[derive(Debug, Eq, PartialEq)]
-struct DoGetCardsReturn {
-    len_due_cards: u32,
-    len_non_due_cards: u32,
-    len_new_cards: u32,
-    type_next_card: u8,
-    next_card: u64,
-    is_short_term: bool,
-}
+    let mut graded_cards: HashMap<CardId, Card> = HashMap::new();
+    for log in &card_history {
+        graded_cards.entry(log.id).or_insert(Card::new());
+        graded_cards
+            .entry(log.id)
+            .and_modify(|card| card.grade(log.ts, log.is_correct));
+    }
 
-fn do_get_cards(n_unix: u64, cards: HashMap<u64, Card>) -> DoGetCardsReturn {
-    // let cards: HashMap<u64, Card> = remove_old_cards(cards, n_unix);
     let mut new_cards: Vec<ThickCard> = vec![];
     let mut due_cards: Vec<ThickCard> = vec![];
     let mut non_due_cards: Vec<ThickCard> = vec![];
-    let how_many_new_cards_done_today = WHEN_WAS_CARD_FIRST_DONE
-        .read()
-        .unwrap()
+
+    let how_many_new_cards_done_today = when_was_card_first_done
         .iter()
-        .filter(|(_, v)| **v >= n_unix - 24 * 60 * 60)
+        .filter(|(_, s)| **s >= n_unix - 24 * 60 * 60)
         .count();
-    for (k, v) in cards {
+
+    let mut future_card_heatmap: BTreeMap<u32, u64> = graded_cards
+        .iter()
+        .filter_map(|(id, c)| c.get_due_timestamp().map(|t| (*id, t)))
+        .collect();
+
+    for (k, v) in graded_cards {
         let t = v.get_due_timestamp();
+        if let Some(timestamp) = t {
+            future_card_heatmap.entry(k).or_insert(timestamp);
+        }
         let new_thick_card = ThickCard {
             id: k,
             last_seen: v.last_seen(),
             is_short_term: v.is_short_term(),
             pos: v.get_pos(),
         };
+
         match t {
-            Option::None => new_cards.push(new_thick_card),
+            None => new_cards.push(new_thick_card),
             Some(t) => {
                 if n_unix > t {
                     due_cards.push(new_thick_card);
@@ -98,11 +127,25 @@ fn do_get_cards(n_unix: u64, cards: HashMap<u64, Card>) -> DoGetCardsReturn {
         };
     }
 
-    let len_due_cards = due_cards.len().try_into().unwrap();
-    let len_non_due_cards = non_due_cards.len().try_into().unwrap();
-    let cards_left = 10_u32.saturating_sub(how_many_new_cards_done_today as u32);
+    let new_cards: Vec<ThickCard> = new_cards
+        .into_iter()
+        .filter(|x| available_cards.contains(&x.id))
+        .collect();
+    let due_cards: Vec<ThickCard> = due_cards
+        .into_iter()
+        .filter(|x| available_cards.contains(&x.id))
+        .collect();
+    let non_due_cards: Vec<ThickCard> = non_due_cards
+        .into_iter()
+        .filter(|x| available_cards.contains(&x.id))
+        .collect();
+
+    let amnt_new_cards = new_cards.len().try_into().unwrap();
+    let amnt_due_cards = due_cards.len().try_into().unwrap();
+    let amnt_non_due_cards = non_due_cards.len().try_into().unwrap();
+    let cards_left = custom_args.max_amount_of_new_cards_per_day.saturating_sub(how_many_new_cards_done_today as u32);
     let len_new_cards = (new_cards.len() as u32).min(cards_left);
-    let (type_next_card, next_card) = if len_due_cards > 0 {
+    let card_to_view = if amnt_due_cards > 0 {
         let card: ThickCard = due_cards
             .iter()
             .fold(&due_cards[0], |a: &ThickCard, b: &ThickCard| {
@@ -116,12 +159,18 @@ fn do_get_cards(n_unix: u64, cards: HashMap<u64, Card>) -> DoGetCardsReturn {
                     b
                 } else if a.id > b.id {
                     a
-                } else {
+                } else if a.id < b.id {
                     b
+                } else {
+                    a
                 }
             })
             .clone();
-        (DUE_CARD, card.id)
+        CardToView::DueCard(scheduler::Card {
+            id: card.id,
+            is_current: false,
+            card_records: vec![],
+        })
     } else if len_new_cards > 0 && how_many_new_cards_done_today < 10 {
         let card: ThickCard = new_cards
             .iter()
@@ -132,8 +181,12 @@ fn do_get_cards(n_unix: u64, cards: HashMap<u64, Card>) -> DoGetCardsReturn {
                 },
             )
             .clone();
-        (NEW_CARD, card.id)
-    } else if len_non_due_cards > 0 {
+        CardToView::NewCard(scheduler::Card {
+            id: card.id,
+            is_current: false,
+            card_records: vec![],
+        })
+    } else if amnt_non_due_cards > 0 {
         let card: ThickCard = non_due_cards
             .iter()
             .fold(&non_due_cards[0], |a: &ThickCard, b: &ThickCard| {
@@ -148,119 +201,143 @@ fn do_get_cards(n_unix: u64, cards: HashMap<u64, Card>) -> DoGetCardsReturn {
                 }
             })
             .clone();
-        (NON_DUE_CARD, card.id)
+
+        CardToView::NonDueCard(scheduler::Card {
+            id: card.id,
+            is_current: false,
+            card_records: vec![],
+        })
     } else {
-        (ERROR_CARD, 0)
+        unreachable!();
     };
-    let is_short_term = if let Some(card) = due_cards.get(0) {
+    let is_short_term = if let Some(card) = due_cards.first() {
         card.is_short_term
     } else {
         false
     };
-    DoGetCardsReturn {
-        len_due_cards,
-        len_non_due_cards,
-        len_new_cards,
-        type_next_card,
-        next_card,
+
+    ResponseCorrect {
+        amnt_new_cards,
+        amnt_due_cards,
+        amnt_non_due_cards,
+        future_card_heatmap,
+        card_to_view: Some(card_to_view),
         is_short_term,
     }
 }
+fn proc_cards(cards: Vec<scheduler::Card>, custom_params: String, n_unix: Timestamp) -> Response {
+    let custom_params: CustomArgs = match serde_json::from_str(&custom_params) {
+        Ok(json) => json,
+        Err(err) => {
+            return Response::BadValue(ResponseWrong {
+                to_log: format!("Unable to parse custom params {custom_params:?}: {err:#?}"),
+                to_user: format!("Unable to parse custom params {custom_params:?}"),
+            });
+        }
+    };
 
-#[unsafe(export_name = "get-cards")]
-unsafe fn get_cards(address: i64, time: i64) {
-    let my_ptr = address as *mut u8;
-    let set: &_ = &*CARDS_SET;
-    let cards_map: HashMap<u64, Card> = set.read().unwrap().clone();
-    let ret = do_get_cards(time as u64, cards_map);
-    unsafe {
-        write_bytes(my_ptr, ret.len_due_cards.to_le_bytes().to_vec());
-    }
-    unsafe {
-        write_bytes(my_ptr.add(4), ret.len_non_due_cards.to_le_bytes().to_vec());
-    }
-    unsafe {
-        write_bytes(my_ptr.add(8), ret.len_new_cards.to_le_bytes().to_vec());
-    }
-    unsafe {
-        write_bytes(my_ptr.add(12), ret.type_next_card.to_le_bytes().to_vec());
-    }
-    unsafe {
-        write_bytes(
-            my_ptr.add(13),
-            if ret.is_short_term { 1 } else { 0_u8 }
-                .to_le_bytes()
-                .to_vec(),
-        );
-    }
-    unsafe {
-        write_bytes(my_ptr.add(14), ret.next_card.to_le_bytes().to_vec());
+
+    let res = std::panic::catch_unwind(|| {
+        safe_proc_cards(
+            cards,
+            n_unix,
+            custom_params,
+        )
+    });
+    match res {
+        Ok(good) => Response::GoodValue(good),
+        Err(err) => Response::BadValue(ResponseWrong {
+            to_log: err_to_string(err),
+            to_user: INTERNAL_ERROR.to_string(),
+        }),
     }
 }
 
-unsafe fn write_bytes(p: *mut u8, val: Vec<u8>) {
-    for (i, v) in val.into_iter().enumerate() {
-        unsafe { p.add(i).write_unaligned(v) };
+fn err_to_string<T: Into<Box<dyn Any + Send>>>(err: T) -> String {
+    let err = err.into();
+    if let Some(message) = err.downcast_ref::<&str>() {
+        message.to_string()
+    } else if let Some(message) = err.downcast_ref::<String>() {
+        message.to_string()
+    } else {
+        "Unknown error".to_string()
     }
+}
+
+const INTERNAL_ERROR: &str = "Internal Error, please look at the server logs for more information.";
+
+#[unsafe(export_name = "get-schema")]
+extern "C" fn get_schema() -> u64 {
+    let s = serde_json::to_string_pretty(&schema_for!(CustomArgs)).unwrap();
+    let buf = s.as_bytes();
+    let p = unsafe { alloc(buf.len()) };
+    unsafe { write_bytes(p as *mut u8, buf) };
+    combine_u32_to_u64(p as u32, s.len() as u32)
+}
+#[unsafe(export_name = "get-cards")]
+fn get_cards(ptr: u64, size: u32, time: u64) -> u64 {
+    let v = unsafe { read_bytes(ptr as *mut u8, size) };
+    let m = ToScheduler::decode(v.as_slice());
+    match m {
+        Ok(to_scheduler) => {
+            let c = proc_cards(to_scheduler.cards, to_scheduler.custom_params, time);
+            let return_val = FromScheduler { response: Some(c) };
+            let mut buf = Vec::with_capacity(return_val.encoded_len());
+            return_val.encode(&mut buf).unwrap();
+            let p = unsafe { alloc(buf.len()) };
+            unsafe { write_bytes(p as *mut u8, buf) };
+            combine_u32_to_u64(p as u32, size)
+        }
+        Err(err) => {
+            let return_val = FromScheduler {
+                response: Some(Response::BadValue(ResponseWrong {
+                    to_log: err.to_string(),
+                    to_user: INTERNAL_ERROR.to_string(),
+                })),
+            };
+            let mut buf = Vec::with_capacity(return_val.encoded_len());
+            return_val.encode(&mut buf).unwrap();
+            let p = unsafe { alloc(buf.len()) };
+            unsafe { write_bytes(p as *mut u8, buf) };
+            combine_u32_to_u64(p as u32, size)
+        }
+    }
+}
+
+fn combine_u32_to_u64(high: u32, low: u32) -> u64 {
+    ((high as u64) << 32) | (low as u64)
+}
+
+unsafe fn write_bytes<T: Deref<Target = [u8]>>(p: *mut u8, val: T) {
+    for (i, v) in val.iter().enumerate() {
+        unsafe { p.add(i).write_unaligned(*v) };
+    }
+}
+
+unsafe fn read_bytes(p: *mut u8, size: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(size as usize);
+    for i in 0..size {
+        v.push(unsafe { p.add(i as usize).read() });
+    }
+    v
 }
 
 #[unsafe(export_name = "init")]
-extern "C" fn init() {
-    let mut c = CARDS_SET.write().unwrap();
-    c.clear();
-    assert_eq!(c.len(), 0);
-    let mut c = WHEN_WAS_CARD_FIRST_DONE.write().unwrap();
-    (*c).clear();
-    assert_eq!(c.len(), 0);
-}
-
-fn remove_old_cards(cards_map: HashMap<u64, Card>, cur_time: u64) -> HashMap<u64, Card> {
-    let new_cards = cards_map
-        .into_iter()
-        .map(|(id, card)| {
-            let card: Card = card;
-            if card.is_long_term() {
-                if let Some(expected_interval) = card.get_interval() {
-                    let expected_interval: Duration = expected_interval;
-                    if let Some(last_done) = card.last_seen() {
-                        let diff = cur_time - last_done;
-                        if diff > 2 * expected_interval.as_secs() {
-                            return (id, Card::None);
-                        }
-                    }
-                }
-            }
-            (id, card)
-        })
-        .collect();
-    new_cards
-}
-
-// #[unsafe(export_name = "get-when-questions-due")]
-// extern "C" fn get_when_questions_due() -> u64 {
-//     let set: &_ = &*CARDS_SET;
-//     let cards_map: HashMap<u64, Card> = set.read().unwrap().clone();
-//     let due_dates: Vec<u64> = cards_map
-//         .into_iter()
-//         .filter_map(|(_, card)| {
-//             let card: Card = card;
-//             card.get_due_timestamp()
-//         })
-//         .collect();
-//     let my_ptr = unsafe { alloc(due_dates.len() * 8) } as *mut u8;
-//     for (i, due_date) in due_dates.iter().enumerate() {
-//         unsafe {
-//             write_bytes(my_ptr.add(i * 8), due_date.to_le_bytes().to_vec());
-//         }
-//     }
-//     my_ptr as u64
-// }
+extern "C" fn init() {}
 
 #[unsafe(export_name = "alloc")]
 unsafe extern "C" fn alloc(size: usize) -> *mut c_void {
     unsafe { malloc_rust::rust_malloc(size) }
 }
 
+/// UnAllocate code
+///
+/// # Arguments
+///
+/// * `ptr`: the pointer to free
+///
+/// # Safety
+/// ptr must be valid
 #[unsafe(export_name = "dealloc")]
 pub unsafe extern "C" fn dealloc(ptr: *mut c_void) {
     unsafe {
@@ -270,7 +347,10 @@ pub unsafe extern "C" fn dealloc(ptr: *mut c_void) {
 
 #[derive(Debug, Clone)]
 enum Card {
-    None,
+    None {
+        multiplier: u64,
+        last_check: Option<u64>,
+    },
     Wrong {
         pos: u8,
         multiplier: u64,
@@ -293,31 +373,28 @@ enum Card {
 
 impl Card {
     fn new() -> Self {
-        Card::None
+        Card::None {
+            multiplier: 0,
+            last_check: None,
+        }
     }
     fn is_short_term(&self) -> bool {
         match self {
-            Card::None | Card::LongTerm { .. } => false,
+            Card::None { .. } | Card::LongTerm { .. } => false,
             Card::ShortTerm { .. } | Card::Wrong { .. } => true,
         }
     }
 
-    fn is_long_term(&self) -> bool {
-        match self {
-            Card::LongTerm { .. } => false,
-            Card::None | Card::ShortTerm { .. } | Card::Wrong { .. } => true,
-        }
-    }
     fn get_pos(&self) -> Option<u32> {
         match self {
-            Card::None => None,
+            Card::None { .. } => None,
             Card::Wrong { pos, .. } | Card::ShortTerm { pos, .. } => Some((*pos).into()),
             Card::LongTerm { pos, .. } => Some(u32::from(*pos) + u32::from(u8::MAX)),
         }
     }
     fn last_seen(&self) -> Option<u64> {
         match self {
-            Card::None => None,
+            Card::None { last_check, .. } => *last_check,
             Card::Wrong { last_check, .. }
             | Card::ShortTerm { last_check, .. }
             | Card::LongTerm { last_check, .. } => Some(*last_check),
@@ -325,26 +402,48 @@ impl Card {
     }
     fn grade(&mut self, time: u64, correct: bool) {
         if !correct {
-            let multiplyer = match self {
-                Card::ShortTerm { multiplier, .. } | Card::Wrong { multiplier, .. } => *multiplier,
+            let interval = self.get_interval();
+            let multiplier = match self {
+                Card::ShortTerm { multiplier, .. }
+                | Card::Wrong { multiplier, .. }
+                | Card::None { multiplier, .. } => *multiplier,
                 Card::LongTerm {
-                    multiplier: multiplyer,
+                    multiplier,
+                    last_check,
                     ..
-                } => *multiplyer + 1,
-                Card::None => 0,
+                } => {
+                    if time - *last_check > 2 * interval.unwrap().as_secs() {
+                        *multiplier + 1
+                    } else {
+                        *multiplier
+                    }
+                }
             };
-            *self = Card::Wrong {
-                pos: 0,
-                multiplier: multiplyer,
-                last_check: time,
-                last_graded_check: time,
+            let should_go_back = if let Card::LongTerm { last_check, .. } = self {
+                time - *last_check > 2 * interval.unwrap().as_secs()
+            } else {
+                false
             };
+
+            if should_go_back {
+                *self = Card::None {
+                    multiplier,
+                    last_check: Some(time),
+                };
+            } else {
+                *self = Card::Wrong {
+                    pos: 0,
+                    multiplier,
+                    last_check: time,
+                    last_graded_check: time,
+                };
+            }
         } else {
             match self.clone() {
-                Card::None => {
+                Card::None { multiplier, .. } => {
                     *self = Card::ShortTerm {
                         pos: 0,
-                        multiplier: 0,
+                        multiplier,
                         last_graded_check: time,
                         last_check: time,
                     };
@@ -427,18 +526,16 @@ impl Card {
 
     fn get_interval(&self) -> Option<Duration> {
         match self {
-            Card::None => None,
+            Card::None { .. } => None,
             Card::Wrong { .. } => Some(Duration::from_secs(15)),
             Card::ShortTerm { pos, .. } => {
                 Some(Duration::from_secs(get_interval_secs_short_term(*pos)))
             }
             Card::LongTerm {
-                pos,
-                multiplier: multiplyer,
-                ..
+                pos, multiplier, ..
             } => Some(Duration::from_secs(get_interval_secs_long_term(
                 *pos,
-                *multiplyer,
+                *multiplier,
             ))),
         }
     }
@@ -450,7 +547,7 @@ impl Card {
             return None;
         };
         match self {
-            Card::None => None,
+            Card::None { .. } => None,
             Card::Wrong {
                 last_graded_check, ..
             }
