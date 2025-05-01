@@ -25,9 +25,12 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Build 
         run: |
-           cargo build --release --target wasm32-unknown-unknown
+          apt-get install -y protobuf-compiler
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest          
+          cargo build --release --target wasm32-unknown-unknown
            cp ./target/wasm32-unknown-unknown/release/my_algorithm.wasm /tmp
            git clone  --depth 1 https://github.com/forgetaboutitapp/forget-about-it
+           git clone  --depth 1 https://github.com/forgetaboutitapp/protobufs
            cd forget-about-it/server
            go build ./cmd/builder
            mkdir -p ${{ github.workspace }}/releases
@@ -48,9 +51,12 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Build 
         run: |
+           apt-get install -y protobuf-compiler
+           go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
            cargo build --release --target wasm32-unknown-unknown
            cp ./target/wasm32-unknown-unknown/release/my_algorithm.wasm /tmp
            git clone  --depth 1 https://github.com/forgetaboutitapp/forget-about-it
+           git clone  --depth 1 https://github.com/forgetaboutitapp/protobufs
            cd forget-about-it/server
            go build ./cmd/builder
            mkdir -p ${{ github.workspace }}/releases
