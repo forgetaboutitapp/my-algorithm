@@ -37,7 +37,7 @@ jobs:
            cd forget-about-it/server
            go build ./cmd/builder
            mkdir -p ${{ github.workspace }}/releases
-           ./builder -allocating alloc -author "OrganomagnesiumHalide" -desc "My Custom Algorithm" -freeing "dealloc" -init "my_init" -license "AGPLv3.0" -mod "env" -version 1 -wasm /tmp/my_algorithm.wasm -website "https://github.com/forgetaboutitapp/my-algorithm" -name "My Algorithm" -download-url "https://github.com/forgetaboutitapp/my-algorithm" -o ${{ github.workspace }}/releases/my-algorithm.json
+           ./builder -allocating alloc -author "OrganomagnesiumHalide" -desc "My Custom Algorithm" -freeing "dealloc" -init "my_init" -license "AGPLv3.0" -mod "env" -version 2 -wasm /tmp/my_algorithm.wasm -website "https://github.com/forgetaboutitapp/my-algorithm" -name "My Algorithm" -download-url "https://github.com/forgetaboutitapp/my-algorithm" -o ${{ github.workspace }}/releases/my-algorithm.json
   deploy:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
