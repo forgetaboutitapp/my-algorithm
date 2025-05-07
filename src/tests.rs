@@ -2,8 +2,8 @@
 #[cfg(all(target_os = "wasi", target_env = "p1"))]
 mod integration {
     use crate::scheduler::from_scheduler::Response;
-    use crate::scheduler::response_correct::CardToView::NoCard;
-    use crate::scheduler::{FromScheduler, ToScheduler};
+    use crate::scheduler::response_correct::CardToView::{NewCard, NoCard};
+    use crate::scheduler::{Card, FromScheduler, ResponseCorrect, ToScheduler};
     use crate::{get_cards, read_bytes, write_bytes};
     use prost::Message;
     use std::ffi::c_void;
@@ -48,6 +48,61 @@ mod integration {
             Response::BadValue(e) => panic!("bad value: {:?}", e),
         };
         assert_eq!(r.card_to_view.unwrap(), NoCard(Default::default()));
+        unsafe {
+            crate::dealloc(p);
+        }
+        unsafe {
+            crate::dealloc(p_n as *mut c_void);
+        }
+    }
+
+    #[test]
+    fn has_card_but_no_history() {
+        let p = ToScheduler {
+            cards: vec![
+                Card {
+                    id: 361535846,
+                    tags: vec!["t3".into(), "t5".into()],
+                    card_records: vec![],
+                },
+                Card {
+                    id: 3182784968,
+                    tags: vec!["t1".into(), "t2".into()],
+                    card_records: vec![],
+                },
+            ],
+            custom_params: "{}".to_string(),
+            tags_to_query: vec!["t3".into()],
+        };
+        let mut v = Vec::new();
+        p.encode(&mut v).unwrap();
+        let p = unsafe { crate::alloc(v.len()) };
+        unsafe {
+            write_bytes(p as *mut u8, &v);
+        }
+        let res = get_cards(p as u64, v.len() as u32, 0);
+        let (p_n, l) = split_u64(res);
+        let b = unsafe { read_bytes(p_n as *mut u8, l) };
+        let r = FromScheduler::decode(&mut b.as_slice()).unwrap();
+        let r = match r.response.unwrap() {
+            Response::GoodValue(g) => g,
+            Response::BadValue(e) => panic!("bad value: {:?}", e),
+        };
+        assert_eq!(
+            r,
+            ResponseCorrect {
+                amnt_new_cards: 1,
+                amnt_due_cards: 0,
+                amnt_non_due_cards: 0,
+                is_short_term: false,
+                future_card_heatmap: Default::default(),
+                card_to_view: Some(NewCard(Card {
+                    id: 361535846,
+                    tags: vec!["t3".into(), "t5".into()],
+                    card_records: vec![],
+                }))
+            }
+        );
         unsafe {
             crate::dealloc(p);
         }
@@ -106,7 +161,7 @@ mod draw_charts {
 mod test_unit {
     use crate::scheduler::from_scheduler::Response;
     use crate::scheduler::response_correct::CardToView::NoCard;
-    use crate::{Card, proc_cards};
+    use crate::{proc_cards, Card};
     use std::collections::HashSet;
     use std::time::Duration;
 
@@ -179,7 +234,7 @@ mod test_unit {
 mod test_integration {
     use crate::scheduler::response_correct::CardToView;
     use crate::scheduler::{Card, CardRecord};
-    use crate::{CustomArgs, ToScheduler, safe_proc_cards};
+    use crate::{safe_proc_cards, CustomArgs, ToScheduler};
     use prost_types::Timestamp;
 
     #[test]

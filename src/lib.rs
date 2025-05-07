@@ -3,7 +3,7 @@ use crate::scheduler::response_correct::CardToView;
 use crate::scheduler::{FromScheduler, ResponseCorrect, ResponseWrong, ToScheduler};
 use core::{convert::From, ffi::c_void, time::Duration};
 use prost::Message;
-use schemars::{JsonSchema, schema_for};
+use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashSet;
@@ -57,11 +57,11 @@ fn safe_proc_cards(
     let mut when_was_card_first_done = HashMap::new();
     let cards_to_hash: HashMap<u32, Vec<String>> =
         cards.iter().map(|a| (a.id, a.tags.clone())).collect();
-    for card in cards {
+    for card in &cards {
         if card.tags.iter().any(|tag| tags_to_ask.contains(tag)) {
             available_cards.insert(card.id);
         }
-        for ts in card.card_records {
+        for ts in &card.card_records {
             let when = ts.when.unwrap().seconds as Timestamp;
 
             when_was_card_first_done
@@ -91,7 +91,6 @@ fn safe_proc_cards(
             .and_modify(|card| card.grade(log.ts, log.is_correct));
     }
 
-    let mut new_cards: Vec<ThickCard> = vec![];
     let mut due_cards: Vec<ThickCard> = vec![];
     let mut non_due_cards: Vec<ThickCard> = vec![];
 
@@ -117,17 +116,25 @@ fn safe_proc_cards(
             pos: v.get_pos(),
         };
 
-        match t {
-            None => new_cards.push(new_thick_card),
-            Some(t) => {
-                if n_unix > t {
-                    due_cards.push(new_thick_card);
-                } else {
-                    non_due_cards.push(new_thick_card);
-                }
+        if let Some(t) = t {
+            if n_unix > t {
+                due_cards.push(new_thick_card);
+            } else {
+                non_due_cards.push(new_thick_card);
             }
-        };
+        }
     }
+
+    let new_cards: Vec<ThickCard> = cards
+        .iter()
+        .filter(|a| a.card_records.is_empty())
+        .map(|a| ThickCard {
+            id: a.id,
+            last_seen: None,
+            is_short_term: false,
+            pos: None,
+        })
+        .collect();
 
     let new_cards: Vec<ThickCard> = new_cards
         .into_iter()
@@ -293,10 +300,7 @@ fn get_cards(ptr: u64, size: u32, time: u64) -> u64 {
         Ok(to_scheduler) => {
             let c = proc_cards(
                 to_scheduler.cards,
-                to_scheduler
-                    .tags_to_query
-                    .iter().cloned()
-                    .collect(),
+                to_scheduler.tags_to_query.iter().cloned().collect(),
                 to_scheduler.custom_params,
                 time,
             );
