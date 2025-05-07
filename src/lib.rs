@@ -295,8 +295,7 @@ fn get_cards(ptr: u64, size: u32, time: u64) -> u64 {
                 to_scheduler.cards,
                 to_scheduler
                     .tags_to_query
-                    .iter()
-                    .map(|x| x.clone())
+                    .iter().cloned()
                     .collect(),
                 to_scheduler.custom_params,
                 time,
@@ -514,7 +513,7 @@ impl Card {
                             pos: pos + 1,
                             multiplier,
                             last_check: time,
-                            last_graded_check: (time),
+                            last_graded_check: time,
                         }
                     }
                 }
