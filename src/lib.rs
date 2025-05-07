@@ -3,12 +3,11 @@ use crate::scheduler::response_correct::CardToView;
 use crate::scheduler::{FromScheduler, ResponseCorrect, ResponseWrong, ToScheduler};
 use core::{convert::From, ffi::c_void, time::Duration};
 use prost::Message;
-use schemars::{schema_for, JsonSchema};
+use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
-use std::ops::Deref;
 
 mod tests;
 
@@ -17,11 +16,11 @@ pub struct CustomArgs {
     #[schemars(range(min = 0, max = 1024))]
     /// # Max New Cards Per Day
     /// How many new cards should one do per day (max is 1024).
-    max_amount_of_new_cards_per_day: u32,
+    max_amount_of_new_cards_per_day: Option<u32>,
     #[schemars(range(min = 0, max = 23))]
     /// # Starting Hour
     /// At what hour of the day (where 0 is midnight and 23 is 11 PM) does the day start
-    starting_hour: u8,
+    starting_hour: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,14 +48,17 @@ struct LogSnapshot {
 
 fn safe_proc_cards(
     cards: Vec<scheduler::Card>,
+    tags_to_ask: HashSet<String>,
     n_unix: Timestamp,
-    custom_args: CustomArgs
+    custom_args: CustomArgs,
 ) -> ResponseCorrect {
     let mut card_history: Vec<LogSnapshot> = Vec::new();
     let mut available_cards: HashSet<CardId> = HashSet::new();
     let mut when_was_card_first_done = HashMap::new();
+    let cards_to_hash: HashMap<u32, Vec<String>> =
+        cards.iter().map(|a| (a.id, a.tags.clone())).collect();
     for card in cards {
-        if card.is_current {
+        if card.tags.iter().any(|tag| tags_to_ask.contains(tag)) {
             available_cards.insert(card.id);
         }
         for ts in card.card_records {
@@ -143,7 +145,10 @@ fn safe_proc_cards(
     let amnt_new_cards = new_cards.len().try_into().unwrap();
     let amnt_due_cards = due_cards.len().try_into().unwrap();
     let amnt_non_due_cards = non_due_cards.len().try_into().unwrap();
-    let cards_left = custom_args.max_amount_of_new_cards_per_day.saturating_sub(how_many_new_cards_done_today as u32);
+    let cards_left = custom_args
+        .max_amount_of_new_cards_per_day
+        .unwrap_or(10)
+        .saturating_sub(how_many_new_cards_done_today as u32);
     let len_new_cards = (new_cards.len() as u32).min(cards_left);
     let card_to_view = if amnt_due_cards > 0 {
         let card: ThickCard = due_cards
@@ -168,8 +173,8 @@ fn safe_proc_cards(
             .clone();
         CardToView::DueCard(scheduler::Card {
             id: card.id,
-            is_current: false,
             card_records: vec![],
+            tags: cards_to_hash[&card.id].clone(),
         })
     } else if len_new_cards > 0 && how_many_new_cards_done_today < 10 {
         let card: ThickCard = new_cards
@@ -183,7 +188,7 @@ fn safe_proc_cards(
             .clone();
         CardToView::NewCard(scheduler::Card {
             id: card.id,
-            is_current: false,
+            tags: cards_to_hash[&card.id].clone(),
             card_records: vec![],
         })
     } else if amnt_non_due_cards > 0 {
@@ -204,11 +209,11 @@ fn safe_proc_cards(
 
         CardToView::NonDueCard(scheduler::Card {
             id: card.id,
-            is_current: false,
+            tags: cards_to_hash[&card.id].clone(),
             card_records: vec![],
         })
     } else {
-        unreachable!();
+        CardToView::NoCard(Default::default())
     };
     let is_short_term = if let Some(card) = due_cards.first() {
         card.is_short_term
@@ -225,25 +230,31 @@ fn safe_proc_cards(
         is_short_term,
     }
 }
-fn proc_cards(cards: Vec<scheduler::Card>, custom_params: String, n_unix: Timestamp) -> Response {
-    let custom_params: CustomArgs = match serde_json::from_str(&custom_params) {
-        Ok(json) => json,
-        Err(err) => {
-            return Response::BadValue(ResponseWrong {
-                to_log: format!("Unable to parse custom params {custom_params:?}: {err:#?}"),
-                to_user: format!("Unable to parse custom params {custom_params:?}"),
-            });
+fn proc_cards(
+    cards: Vec<scheduler::Card>,
+    tags_to_ask: HashSet<String>,
+    custom_params: String,
+    n_unix: Timestamp,
+) -> Response {
+    let custom_params: CustomArgs = if custom_params.is_empty() {
+        CustomArgs {
+            max_amount_of_new_cards_per_day: Default::default(),
+            starting_hour: Default::default(),
+        }
+    } else {
+        match serde_json::from_str(&custom_params) {
+            Ok(json) => json,
+            Err(err) => {
+                return Response::BadValue(ResponseWrong {
+                    to_log: format!("Unable to parse custom params {custom_params:?}: {err:#?}"),
+                    to_user: format!("Unable to parse custom params {custom_params:?}"),
+                });
+            }
         }
     };
 
-
-    let res = std::panic::catch_unwind(|| {
-        safe_proc_cards(
-            cards,
-            n_unix,
-            custom_params,
-        )
-    });
+    let res =
+        std::panic::catch_unwind(|| safe_proc_cards(cards, tags_to_ask, n_unix, custom_params));
     match res {
         Ok(good) => Response::GoodValue(good),
         Err(err) => Response::BadValue(ResponseWrong {
@@ -280,13 +291,22 @@ fn get_cards(ptr: u64, size: u32, time: u64) -> u64 {
     let m = ToScheduler::decode(v.as_slice());
     match m {
         Ok(to_scheduler) => {
-            let c = proc_cards(to_scheduler.cards, to_scheduler.custom_params, time);
+            let c = proc_cards(
+                to_scheduler.cards,
+                to_scheduler
+                    .tags_to_query
+                    .iter()
+                    .map(|x| x.clone())
+                    .collect(),
+                to_scheduler.custom_params,
+                time,
+            );
             let return_val = FromScheduler { response: Some(c) };
             let mut buf = Vec::with_capacity(return_val.encoded_len());
             return_val.encode(&mut buf).unwrap();
             let p = unsafe { alloc(buf.len()) };
-            unsafe { write_bytes(p as *mut u8, buf) };
-            combine_u32_to_u64(p as u32, size)
+            unsafe { write_bytes(p as *mut u8, &buf) };
+            combine_u32_to_u64(p as u32, buf.len() as u32)
         }
         Err(err) => {
             let return_val = FromScheduler {
@@ -298,7 +318,7 @@ fn get_cards(ptr: u64, size: u32, time: u64) -> u64 {
             let mut buf = Vec::with_capacity(return_val.encoded_len());
             return_val.encode(&mut buf).unwrap();
             let p = unsafe { alloc(buf.len()) };
-            unsafe { write_bytes(p as *mut u8, buf) };
+            unsafe { write_bytes(p as *mut u8, &buf) };
             combine_u32_to_u64(p as u32, size)
         }
     }
@@ -308,7 +328,7 @@ fn combine_u32_to_u64(high: u32, low: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
-unsafe fn write_bytes<T: Deref<Target = [u8]>>(p: *mut u8, val: T) {
+unsafe fn write_bytes(p: *mut u8, val: &[u8]) {
     for (i, v) in val.iter().enumerate() {
         unsafe { p.add(i).write_unaligned(*v) };
     }
