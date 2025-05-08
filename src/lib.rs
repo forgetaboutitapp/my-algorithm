@@ -1,10 +1,11 @@
 use crate::scheduler::from_scheduler::Response;
 use crate::scheduler::response_correct::CardToView;
-use crate::scheduler::{FromScheduler, ResponseCorrect, ResponseWrong, ToScheduler};
+use crate::scheduler::{FromScheduler, ResponseCorrect, ResponseWrong, ToScheduler, ToSchema};
+use chrono::{DateTime, Utc};
 use core::{convert::From, ffi::c_void, time::Duration};
 use prost::Message;
-use schemars::{schema_for, JsonSchema};
-use serde::{Deserialize, Serialize};
+use schemars::{JsonSchema, schema_for};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::Any;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
@@ -21,6 +22,35 @@ pub struct CustomArgs {
     /// # Starting Hour
     /// At what hour of the day (where 0 is midnight and 23 is 11 PM) does the day start
     starting_hour: Option<u8>,
+    /// # Exam Days
+    /// What days will various tags be tested
+    exam_days: Option<Vec<TagToDate>>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TagToDate {
+    tags: Vec<String>,
+    #[serde(serialize_with = "serialize_dt")]
+    #[serde(deserialize_with = "deserialize_dt")]
+    date: DateTime<Utc>,
+}
+pub fn serialize_dt<S>(dt: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    dt.to_rfc3339().serialize(serializer)
+}
+
+pub fn deserialize_dt<'de, D>(
+    deserializer: D,
+) -> Result<DateTime<Utc>, <D as Deserializer<'de>>::Error>
+where
+    D: Deserializer<'de>,
+{
+    let buf = String::deserialize(deserializer)?;
+    DateTime::parse_from_rfc3339(&buf)
+        .map_err(|e| serde::de::Error::custom(e.to_string()))
+        .map(|a| a.with_timezone(&Utc))
 }
 
 #[derive(Debug, Clone)]
@@ -81,14 +111,14 @@ fn safe_proc_cards(
         }
     }
     // sort card history by chronological order, lowest to highest
-    card_history.sort_by(|a, b| b.ts.cmp(&a.ts));
+    card_history.sort_by(|a, b| a.ts.cmp(&b.ts));
 
     let mut graded_cards: HashMap<CardId, Card> = HashMap::new();
     for log in &card_history {
         graded_cards.entry(log.id).or_insert(Card::new());
-        graded_cards
-            .entry(log.id)
-            .and_modify(|card| card.grade(log.ts, log.is_correct));
+        graded_cards.entry(log.id).and_modify(|card| {
+            card.grade(log.ts, log.is_correct);
+        });
     }
 
     let mut due_cards: Vec<ThickCard> = vec![];
@@ -96,7 +126,7 @@ fn safe_proc_cards(
 
     let how_many_new_cards_done_today = when_was_card_first_done
         .iter()
-        .filter(|(_, s)| **s >= n_unix - 24 * 60 * 60)
+        .filter(|(_, s)| **s + 24 * 60 * 60 >= n_unix)
         .count();
 
     let mut future_card_heatmap: BTreeMap<u32, u64> = graded_cards
@@ -109,6 +139,7 @@ fn safe_proc_cards(
         if let Some(timestamp) = t {
             future_card_heatmap.entry(k).or_insert(timestamp);
         }
+
         let new_thick_card = ThickCard {
             id: k,
             last_seen: v.last_seen(),
@@ -124,6 +155,9 @@ fn safe_proc_cards(
             }
         }
     }
+
+    due_cards.sort_by(|a, b| a.last_seen.cmp(&b.last_seen));
+    non_due_cards.sort_by(|a, b| a.last_seen.cmp(&b.last_seen));
 
     let new_cards: Vec<ThickCard> = cards
         .iter()
@@ -247,6 +281,7 @@ fn proc_cards(
         CustomArgs {
             max_amount_of_new_cards_per_day: Default::default(),
             starting_hour: Default::default(),
+            exam_days: None,
         }
     } else {
         match serde_json::from_str(&custom_params) {
@@ -285,7 +320,7 @@ fn err_to_string<T: Into<Box<dyn Any + Send>>>(err: T) -> String {
 const INTERNAL_ERROR: &str = "Internal Error, please look at the server logs for more information.";
 
 #[unsafe(export_name = "get-schema")]
-extern "C" fn get_schema() -> u64 {
+extern "C" fn get_schema(_p: u32, _l: u32) -> u64 {
     let s = serde_json::to_string_pretty(&schema_for!(CustomArgs)).unwrap();
     let buf = s.as_bytes();
     let p = unsafe { alloc(buf.len()) };
@@ -373,6 +408,7 @@ enum Card {
     None {
         multiplier: u64,
         last_check: Option<u64>,
+        last_graded_check: Option<u64>,
     },
     Wrong {
         pos: u8,
@@ -399,6 +435,7 @@ impl Card {
         Card::None {
             multiplier: 0,
             last_check: None,
+            last_graded_check: None,
         }
     }
     fn is_short_term(&self) -> bool {
@@ -452,6 +489,7 @@ impl Card {
                 *self = Card::None {
                     multiplier,
                     last_check: Some(time),
+                    last_graded_check: Some(time),
                 };
             } else {
                 *self = Card::Wrong {
@@ -462,7 +500,7 @@ impl Card {
                 };
             }
         } else {
-            match self.clone() {
+            match *self {
                 Card::None { multiplier, .. } => {
                     *self = Card::ShortTerm {
                         pos: 0,
@@ -545,8 +583,25 @@ impl Card {
                 }
             }
         }
+        assert!(self.last_seen() >= self.last_graded_check());
     }
 
+    fn last_graded_check(&self) -> Option<u64> {
+        match *self {
+            Card::None {
+                last_graded_check, ..
+            } => last_graded_check,
+            Card::Wrong {
+                last_graded_check, ..
+            } => last_graded_check.into(),
+            Card::ShortTerm {
+                last_graded_check, ..
+            } => last_graded_check.into(),
+            Card::LongTerm {
+                last_graded_check, ..
+            } => last_graded_check.into(),
+        }
+    }
     fn get_interval(&self) -> Option<Duration> {
         match self {
             Card::None { .. } => None,

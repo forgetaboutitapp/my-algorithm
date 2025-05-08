@@ -2,8 +2,8 @@
 #[cfg(all(target_os = "wasi", target_env = "p1"))]
 mod integration {
     use crate::scheduler::from_scheduler::Response;
-    use crate::scheduler::response_correct::CardToView::{NewCard, NoCard};
-    use crate::scheduler::{Card, FromScheduler, ResponseCorrect, ToScheduler};
+    use crate::scheduler::response_correct::CardToView::{DueCard, NewCard, NoCard, NonDueCard};
+    use crate::scheduler::{Card, CardRecord, FromScheduler, ResponseCorrect, ToScheduler};
     use crate::{get_cards, read_bytes, write_bytes};
     use prost::Message;
     use std::ffi::c_void;
@@ -110,6 +110,215 @@ mod integration {
             crate::dealloc(p_n as *mut c_void);
         }
     }
+
+    #[test]
+    fn has_two_cards_with_history_id_order_one() {
+        has_two_cards_with_history(1, 2);
+    }
+    #[test]
+    fn has_two_cards_with_history_id_order_other() {
+        has_two_cards_with_history(2, 1);
+    }
+
+    #[test]
+    fn has_two_cards_with_three_history_id_order_one() {
+        has_two_cards_with_three_history(1, 2);
+    }
+    #[test]
+    fn has_two_cards_with_three_history_id_order_other() {
+        has_two_cards_with_three_history(2, 1);
+    }
+
+    fn has_two_cards_with_history(id1: u32, id2: u32) {
+        let p = ToScheduler {
+            cards: vec![
+                Card {
+                    id: id1,
+                    tags: vec!["t1".into()],
+                    card_records: vec![CardRecord {
+                        when: Some(prost_types::Timestamp {
+                            seconds: 1000 + 24 * 24 * 60,
+                            nanos: 0,
+                        }),
+                        correct: true,
+                    }],
+                },
+                Card {
+                    id: id2,
+                    tags: vec!["t1".into()],
+                    card_records: vec![CardRecord {
+                        when: Some(prost_types::Timestamp {
+                            seconds: 1005 + 24 * 24 * 60,
+                            nanos: 0,
+                        }),
+                        correct: true,
+                    }],
+                },
+            ],
+            custom_params: "{}".to_string(),
+            tags_to_query: vec!["t1".into()],
+        };
+        let mut v = Vec::new();
+        p.encode(&mut v).unwrap();
+        let p = unsafe { crate::alloc(v.len()) };
+        unsafe {
+            write_bytes(p as *mut u8, &v);
+        }
+        let res = get_cards(p as u64, v.len() as u32, 1005 + 24 * 24 * 60 + 10);
+        let (p_n, l) = split_u64(res);
+        let b = unsafe { read_bytes(p_n as *mut u8, l) };
+        let r = FromScheduler::decode(&mut b.as_slice()).unwrap();
+        let r = match r.response.unwrap() {
+            Response::GoodValue(g) => g,
+            Response::BadValue(e) => panic!("bad value: {:?}", e),
+        };
+        assert_eq!(r.amnt_due_cards, 0);
+        assert_eq!(r.amnt_non_due_cards, 2);
+        assert_eq!(r.is_short_term, false);
+        assert_eq!(r.amnt_new_cards, 0);
+        assert_eq!(
+            r.card_to_view.unwrap(),
+            NonDueCard(Card {
+                id: id1,
+                tags: vec!["t1".into()],
+                card_records: vec![],
+            })
+        );
+        unsafe {
+            crate::dealloc(p);
+        }
+        unsafe {
+            crate::dealloc(p_n as *mut c_void);
+        }
+    }
+
+    fn has_two_cards_with_three_history(id1: u32, id2: u32) {
+        let p = ToScheduler {
+            cards: vec![
+                Card {
+                    id: id1,
+                    tags: vec!["t1".into()],
+                    card_records: vec![
+                        CardRecord {
+                            when: Some(prost_types::Timestamp {
+                                seconds: 1000 + 24 * 24 * 60,
+                                nanos: 0,
+                            }),
+                            correct: true,
+                        },
+                        CardRecord {
+                            when: Some(prost_types::Timestamp {
+                                seconds: 1000 + 24 * 24 * 60 + 6,
+                                nanos: 0,
+                            }),
+                            correct: true,
+                        },
+                    ],
+                },
+                Card {
+                    id: id2,
+                    tags: vec!["t1".into()],
+                    card_records: vec![CardRecord {
+                        when: Some(prost_types::Timestamp {
+                            seconds: 1005 + 24 * 24 * 60,
+                            nanos: 0,
+                        }),
+                        correct: true,
+                    }],
+                },
+            ],
+            custom_params: "{}".to_string(),
+            tags_to_query: vec!["t1".into()],
+        };
+        let mut v = Vec::new();
+        p.encode(&mut v).unwrap();
+        let p = unsafe { crate::alloc(v.len()) };
+        unsafe {
+            write_bytes(p as *mut u8, &v);
+        }
+        let res = get_cards(p as u64, v.len() as u32, 1005 + 24 * 24 * 60 + 10);
+        let (p_n, l) = split_u64(res);
+        let b = unsafe { read_bytes(p_n as *mut u8, l) };
+        let r = FromScheduler::decode(&mut b.as_slice()).unwrap();
+        let r = match r.response.unwrap() {
+            Response::GoodValue(g) => g,
+            Response::BadValue(e) => panic!("bad value: {:?}", e),
+        };
+        assert_eq!(r.amnt_due_cards, 0);
+        assert_eq!(r.amnt_non_due_cards, 2);
+        assert_eq!(r.is_short_term, false);
+        assert_eq!(r.amnt_new_cards, 0);
+        assert_eq!(
+            r.card_to_view.unwrap(),
+            NonDueCard(Card {
+                id: id2,
+                tags: vec!["t1".into()],
+                card_records: vec![],
+            })
+        );
+        unsafe {
+            crate::dealloc(p);
+        }
+        unsafe {
+            crate::dealloc(p_n as *mut c_void);
+        }
+    }
+
+    #[test]
+    fn single_card_with_history() {
+        let p = ToScheduler {
+            cards: vec![Card {
+                id: 361535846,
+                tags: vec!["t3".into(), "t5".into()],
+                card_records: vec![CardRecord {
+                    when: Some(prost_types::Timestamp {
+                        seconds: 1000 * 100 + 24 * 24 * 60,
+                        nanos: 0,
+                    }),
+                    correct: true,
+                }],
+            }],
+            custom_params: "".to_string(),
+            tags_to_query: vec!["t3".into()],
+        };
+        let mut v = Vec::new();
+        p.encode(&mut v).unwrap();
+        let p = unsafe { crate::alloc(v.len()) };
+        unsafe {
+            write_bytes(p as *mut u8, &v);
+        }
+        let res = get_cards(
+            p as u64,
+            v.len() as u32,
+            1000 * 100 + 24 * 24 * 60 + 15 * 60 + 1,
+        );
+        let (p_n, l) = split_u64(res);
+        let b = unsafe { read_bytes(p_n as *mut u8, l) };
+        let r = FromScheduler::decode(&mut b.as_slice()).unwrap();
+        let r = match r.response.unwrap() {
+            Response::GoodValue(g) => g,
+            Response::BadValue(e) => panic!("bad value: {:?}", e),
+        };
+        assert_eq!(r.amnt_new_cards, 0);
+        assert_eq!(r.amnt_non_due_cards, 0);
+        assert_eq!(r.is_short_term, true);
+        assert_eq!(r.amnt_due_cards, 1);
+        assert_eq!(
+            r.card_to_view,
+            Some(DueCard(Card {
+                id: 361535846,
+                tags: vec!["t3".into(), "t5".into()],
+                card_records: vec![],
+            }))
+        );
+
+        unsafe {
+            crate::dealloc(p);
+        }
+        unsafe {
+            crate::dealloc(p_n as *mut c_void);
+        }
+    }
 }
 #[cfg(not(all(target_os = "wasi", target_env = "p1")))]
 #[cfg(test)]
@@ -161,7 +370,7 @@ mod draw_charts {
 mod test_unit {
     use crate::scheduler::from_scheduler::Response;
     use crate::scheduler::response_correct::CardToView::NoCard;
-    use crate::{proc_cards, Card};
+    use crate::{Card, proc_cards};
     use std::collections::HashSet;
     use std::time::Duration;
 
@@ -221,7 +430,7 @@ mod test_unit {
         assert_eq!(m.get_interval(), Some(Duration::from_secs(60 * 60 * 24)));
         assert_eq!(m.last_seen(), Some(orig));
         let orig = m.get_due_timestamp().unwrap() + 1;
-        m.grade(dbg!(orig), true);
+        m.grade(orig, true);
         assert_eq!(
             m.get_interval(),
             Some(Duration::from_secs(60 * 60 * 24 * 2))
@@ -234,7 +443,7 @@ mod test_unit {
 mod test_integration {
     use crate::scheduler::response_correct::CardToView;
     use crate::scheduler::{Card, CardRecord};
-    use crate::{safe_proc_cards, CustomArgs, ToScheduler};
+    use crate::{CustomArgs, ToScheduler, safe_proc_cards};
     use prost_types::Timestamp;
 
     #[test]
@@ -278,6 +487,7 @@ mod test_integration {
             CustomArgs {
                 max_amount_of_new_cards_per_day: Some(10),
                 starting_hour: 0.into(),
+                exam_days: Some(vec![]),
             },
         );
 
@@ -347,6 +557,7 @@ mod test_integration {
             CustomArgs {
                 max_amount_of_new_cards_per_day: Some(10),
                 starting_hour: 0.into(),
+                exam_days: Some(vec![]),
             },
         );
 
@@ -376,5 +587,3 @@ mod test_integration {
         );
     }
 }
-
-// split u64 to 2 u32
