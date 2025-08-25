@@ -1,6 +1,6 @@
 use crate::scheduler::from_scheduler::Response;
 use crate::scheduler::response_correct::CardToView;
-use crate::scheduler::{FromScheduler, ResponseCorrect, ResponseWrong, ToScheduler, ToSchema};
+use crate::scheduler::{FromScheduler, ResponseCorrect, ResponseWrong, ToScheduler};
 use chrono::{DateTime, Utc};
 use core::{convert::From, ffi::c_void, time::Duration};
 use prost::Message;
@@ -81,6 +81,7 @@ fn safe_proc_cards(
     tags_to_ask: HashSet<String>,
     n_unix: Timestamp,
     custom_args: CustomArgs,
+    should_do_new_card: bool
 ) -> ResponseCorrect {
     let mut card_history: Vec<LogSnapshot> = Vec::new();
     let mut available_cards: HashSet<CardId> = HashSet::new();
@@ -133,7 +134,6 @@ fn safe_proc_cards(
         .iter()
         .filter_map(|(id, c)| c.get_due_timestamp().map(|t| (*id, t)))
         .collect();
-
     for (k, v) in graded_cards {
         let t = v.get_due_timestamp();
         if let Some(timestamp) = t {
@@ -186,10 +186,14 @@ fn safe_proc_cards(
     let amnt_new_cards = new_cards.len().try_into().unwrap();
     let amnt_due_cards = due_cards.len().try_into().unwrap();
     let amnt_non_due_cards = non_due_cards.len().try_into().unwrap();
-    let cards_left = custom_args
-        .max_amount_of_new_cards_per_day
-        .unwrap_or(10)
-        .saturating_sub(how_many_new_cards_done_today as u32);
+    let cards_left = if !should_do_new_card {
+        custom_args
+            .max_amount_of_new_cards_per_day
+            .unwrap_or(10)
+            .saturating_sub(how_many_new_cards_done_today as u32)
+    } else {
+        1
+    };
     let len_new_cards = (new_cards.len() as u32).min(cards_left);
     let card_to_view = if amnt_due_cards > 0 {
         let card: ThickCard = due_cards
@@ -276,6 +280,7 @@ fn proc_cards(
     tags_to_ask: HashSet<String>,
     custom_params: String,
     n_unix: Timestamp,
+    should_do_new_card: bool,
 ) -> Response {
     let custom_params: CustomArgs = if custom_params.is_empty() {
         CustomArgs {
@@ -296,7 +301,7 @@ fn proc_cards(
     };
 
     let res =
-        std::panic::catch_unwind(|| safe_proc_cards(cards, tags_to_ask, n_unix, custom_params));
+        std::panic::catch_unwind(|| safe_proc_cards(cards, tags_to_ask, n_unix, custom_params, should_do_new_card));
     match res {
         Ok(good) => Response::GoodValue(good),
         Err(err) => Response::BadValue(ResponseWrong {
@@ -338,6 +343,7 @@ fn get_cards(ptr: u64, size: u32, time: u64) -> u64 {
                 to_scheduler.tags_to_query.iter().cloned().collect(),
                 to_scheduler.custom_params,
                 time,
+                to_scheduler.get_new_questions,
             );
             let return_val = FromScheduler { response: Some(c) };
             let mut buf = Vec::with_capacity(return_val.encoded_len());
