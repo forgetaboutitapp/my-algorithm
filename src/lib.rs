@@ -4,7 +4,6 @@ use crate::scheduler::{FromScheduler, ResponseCorrect, ResponseWrong, ToSchedule
 use chrono::{DateTime, Utc};
 use core::{convert::From, ffi::c_void, time::Duration};
 use prost::Message;
-use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::Any;
 use std::collections::HashSet;
@@ -12,13 +11,11 @@ use std::collections::{BTreeMap, HashMap};
 
 mod tests;
 
-#[derive(Deserialize, Serialize, JsonSchema)]
+#[derive(Deserialize, Serialize)]
 pub struct CustomArgs {
-    #[schemars(range(min = 0, max = 1024))]
     /// # Max New Cards Per Day
     /// How many new cards should one do per day (max is 1024).
     max_amount_of_new_cards_per_day: Option<u32>,
-    #[schemars(range(min = 0, max = 23))]
     /// # Starting Hour
     /// At what hour of the day (where 0 is midnight and 23 is 11 PM) does the day start
     starting_hour: Option<u8>,
@@ -27,7 +24,7 @@ pub struct CustomArgs {
     exam_days: Option<Vec<TagToDate>>,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize)]
 pub struct TagToDate {
     tags: Vec<String>,
     #[serde(serialize_with = "serialize_dt")]
@@ -326,7 +323,7 @@ const INTERNAL_ERROR: &str = "Internal Error, please look at the server logs for
 
 #[unsafe(export_name = "get-schema")]
 extern "C" fn get_schema(_p: u32, _l: u32) -> u64 {
-    let s = serde_json::to_string_pretty(&schema_for!(CustomArgs)).unwrap();
+    let s = "s";
     let buf = s.as_bytes();
     let p = unsafe { alloc(buf.len()) };
     unsafe { write_bytes(p as *mut u8, buf) };
