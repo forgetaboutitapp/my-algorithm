@@ -218,7 +218,7 @@ fn safe_proc_cards(
             card_records: vec![],
             tags: cards_to_hash[&card.id].clone(),
         })
-    } else if len_new_cards > 0 && how_many_new_cards_done_today < 10 {
+    } else if len_new_cards > 0 && (should_do_new_card || how_many_new_cards_done_today < 10) {
         let card: ThickCard = new_cards
             .iter()
             .fold(
@@ -526,6 +526,13 @@ impl Card {
                             last_check: time,
                             last_graded_check: time,
                         }
+                    } else {
+                        *self = Card::Wrong {
+                            pos: pos + 1,
+                            multiplier,
+                            last_check: time,
+                            last_graded_check,
+                        }
                     }
                 }
                 Card::ShortTerm {
@@ -621,7 +628,8 @@ impl Card {
         }
     }
     fn get_due_timestamp(&self) -> Option<u64> {
-        let interval = self.get_interval();
+        dbg!(self);
+        let interval = dbg!(self.get_interval());
         let interval: u64 = if let Some(interval) = interval {
             interval.as_secs()
         } else {
@@ -637,7 +645,7 @@ impl Card {
             }
             | Card::LongTerm {
                 last_graded_check, ..
-            } => Some((last_graded_check) + (interval)),
+            } => Some(dbg!(last_graded_check) + interval),
         }
     }
 }

@@ -370,14 +370,14 @@ mod draw_charts {
 mod test_unit {
     use crate::scheduler::from_scheduler::Response;
     use crate::scheduler::response_correct::CardToView::NoCard;
-    use crate::{Card, proc_cards};
+    use crate::{proc_cards, Card};
     use std::collections::HashSet;
     use std::time::Duration;
 
     #[test]
     fn no_cards_no_nothing() {
         let h = HashSet::new();
-        let ret = proc_cards(vec![], h, "{}".to_string(), 0);
+        let ret = proc_cards(vec![], h, "{}".to_string(), 0, true);
         let ret = match ret {
             Response::GoodValue(g) => g,
             Response::BadValue(e) => panic!("wrong type: {:?}", e),
@@ -438,12 +438,42 @@ mod test_unit {
         assert_eq!(m.last_seen(), Some(orig));
         assert_eq!(m.get_due_timestamp(), Some(orig + 60 * 60 * 24 * 2));
     }
+
+    #[test]
+    fn failed_single_card_prod() {
+        let mut m = Card::new();
+
+        assert_eq!(m.get_due_timestamp(), None);
+        assert_eq!(m.get_interval(), None);
+        assert_eq!(m.last_seen(), None);
+        /*
+        id          res timestamp
+        757025923	0	1756181715
+        757025923	0	1756181729
+        757025923	1	1756181741
+        757025923	1	1756181744
+        757025923	1	1756181751
+
+         */
+        m.grade(0, false);
+        m.grade(14, false);
+        assert_eq!(29, m.get_due_timestamp().unwrap());
+        m.grade(26, true);
+        dbg!(&m);
+        dbg!("graded right");
+        assert_eq!(926, m.get_due_timestamp().unwrap());
+        m.grade(29, true);
+        assert_eq!(1829, m.get_due_timestamp().unwrap());
+
+
+    }
+
 }
 #[cfg(test)]
 mod test_integration {
     use crate::scheduler::response_correct::CardToView;
     use crate::scheduler::{Card, CardRecord};
-    use crate::{CustomArgs, ToScheduler, safe_proc_cards};
+    use crate::{safe_proc_cards, CustomArgs, ToScheduler};
     use prost_types::Timestamp;
 
     #[test]
@@ -451,6 +481,7 @@ mod test_integration {
         crate::init();
 
         let to_sched = ToScheduler {
+            get_new_questions: true,
             tags_to_query: vec!["a".to_string(), "b".to_string()],
             custom_params: "".to_string(),
             cards: vec![
@@ -489,6 +520,7 @@ mod test_integration {
                 starting_hour: 0.into(),
                 exam_days: Some(vec![]),
             },
+            true,
         );
 
         assert_eq!(res.amnt_non_due_cards, 3);
@@ -521,6 +553,7 @@ mod test_integration {
     fn b_1() {
         crate::init();
         let to_sched = ToScheduler {
+            get_new_questions: true,
             custom_params: "".to_string(),
             tags_to_query: vec!["a".into(), "b".into()],
             cards: vec![
@@ -559,6 +592,7 @@ mod test_integration {
                 starting_hour: 0.into(),
                 exam_days: Some(vec![]),
             },
+            true,
         );
 
         assert_eq!(res.amnt_non_due_cards, 0);
@@ -586,4 +620,5 @@ mod test_integration {
             Timestamp::date_time(2025, 1, 1, 0, 15, 3).unwrap().seconds as u64
         );
     }
+
 }
