@@ -8,8 +8,212 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::any::Any;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 
-mod tests;
+
+mod unit_tests;
+mod integration_tests;
+
+/// Split testing configuration for A/B testing different algorithm parameters
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct SplitTestConfig {
+    /// Unique identifier for this experiment
+    pub experiment_id: String,
+    /// Percentage of users assigned to variant A (0-100)
+    pub variant_a_percentage: u8,
+    /// Algorithm parameters for variant A
+    pub variant_a_params: AlgorithmParams,
+    /// Algorithm parameters for variant B
+    pub variant_b_params: AlgorithmParams,
+    /// Start date for the experiment
+    #[serde(serialize_with = "serialize_dt")]
+    #[serde(deserialize_with = "deserialize_dt")]
+    pub start_date: DateTime<Utc>,
+    /// End date for the experiment
+    #[serde(serialize_with = "serialize_dt")]
+    #[serde(deserialize_with = "deserialize_dt")]
+    pub end_date: DateTime<Utc>,
+    /// Whether the experiment is currently active
+    pub is_active: bool,
+}
+
+/// Algorithm parameters that can be varied in split tests
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct AlgorithmParams {
+    /// Short-term interval multiplier (default: 4)
+    pub short_term_multiplier: Option<f64>,
+    /// Long-term interval base multiplier (default: 2.0)
+    pub long_term_base_multiplier: Option<f64>,
+    /// Long-term forgetting curve factor (default: 0.9)
+    pub forgetting_curve_factor: Option<f64>,
+    /// Maximum interval in days (default: 365)
+    pub max_interval_days: Option<u16>,
+    /// Wrong answer interval in seconds (default: 15)
+    pub wrong_answer_interval: Option<u64>,
+    /// Initial interval in seconds (default: 15 * 60)
+    pub initial_interval: Option<u64>,
+}
+
+impl Default for AlgorithmParams {
+    fn default() -> Self {
+        Self {
+            short_term_multiplier: Some(4.0),
+            long_term_base_multiplier: Some(2.0),
+            forgetting_curve_factor: Some(0.9),
+            max_interval_days: Some(365),
+            wrong_answer_interval: Some(15),
+            initial_interval: Some(15 * 60),
+        }
+    }
+}
+
+/// Metrics collected during split testing
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct SplitTestMetrics {
+    /// User identifier for consistent assignment
+    pub user_id: String,
+    /// Which variant the user was assigned to
+    pub variant: Variant,
+    /// Card performance metrics
+    pub card_metrics: CardMetrics,
+    /// Session metrics
+    pub session_metrics: SessionMetrics,
+    /// Timestamp when metrics were collected
+    #[serde(serialize_with = "serialize_dt")]
+    #[serde(deserialize_with = "deserialize_dt")]
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub enum Variant {
+    A,
+    B,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct CardMetrics {
+    /// Total cards reviewed
+    pub total_cards: u32,
+    /// Cards answered correctly
+    pub correct_cards: u32,
+    /// Cards answered incorrectly
+    pub incorrect_cards: u32,
+    /// Average response time in milliseconds
+    pub avg_response_time_ms: Option<u64>,
+    /// Cards that graduated to long-term
+    pub graduated_cards: u32,
+    /// Cards that were reset due to errors
+    pub reset_cards: u32,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct SessionMetrics {
+    /// Session duration in seconds
+    pub duration_seconds: u64,
+    /// Number of cards reviewed in this session
+    pub cards_reviewed: u32,
+    /// User engagement score (0-100)
+    pub engagement_score: Option<u8>,
+    /// Whether the session was completed
+    pub completed: bool,
+}
+
+/// Split testing manager for handling experiments
+pub struct SplitTestManager {
+    configs: HashMap<String, SplitTestConfig>,
+    user_assignments: HashMap<String, HashMap<String, Variant>>, // user_id -> experiment_id -> variant
+}
+
+impl SplitTestManager {
+    pub fn new() -> Self {
+        Self {
+            configs: HashMap::new(),
+            user_assignments: HashMap::new(),
+        }
+    }
+
+    /// Add or update an experiment configuration
+    pub fn add_experiment(&mut self, config: SplitTestConfig) {
+        self.configs.insert(config.experiment_id.clone(), config);
+    }
+
+    /// Assign a user to a variant for a specific experiment
+    pub fn assign_user_to_variant(&mut self, user_id: &str, experiment_id: &str) -> Option<Variant> {
+        if let Some(config) = self.configs.get(experiment_id) {
+            if !config.is_active {
+                return None;
+            }
+
+            let now = Utc::now();
+            if now < config.start_date || now > config.end_date {
+                return None;
+            }
+
+            // Check if user already has an assignment
+            if let Some(experiments) = self.user_assignments.get(user_id) {
+                if let Some(variant) = experiments.get(experiment_id) {
+                    return Some(variant.clone());
+                }
+            }
+
+            // Generate consistent assignment based on user_id hash
+            let variant = self.generate_variant_assignment(user_id, config);
+            
+            // Store the assignment
+            self.user_assignments
+                .entry(user_id.to_string())
+                .or_insert_with(HashMap::new)
+                .insert(experiment_id.to_string(), variant.clone());
+
+            Some(variant)
+        } else {
+            None
+        }
+    }
+
+    /// Generate a consistent variant assignment based on user_id
+    fn generate_variant_assignment(&self, user_id: &str, config: &SplitTestConfig) -> Variant {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        user_id.hash(&mut hasher);
+        config.experiment_id.hash(&mut hasher);
+        
+        let hash = hasher.finish();
+        let assignment_value = hash % 100;
+        
+        if assignment_value < config.variant_a_percentage as u64 {
+            Variant::A
+        } else {
+            Variant::B
+        }
+    }
+
+    /// Get algorithm parameters for a user in a specific experiment
+    pub fn get_algorithm_params(&self, user_id: &str, experiment_id: &str) -> Option<AlgorithmParams> {
+        if let Some(variant) = self.user_assignments
+            .get(user_id)
+            .and_then(|experiments| experiments.get(experiment_id)) {
+            
+            if let Some(config) = self.configs.get(experiment_id) {
+                match variant {
+                    Variant::A => Some(config.variant_a_params.clone()),
+                    Variant::B => Some(config.variant_b_params.clone()),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Record metrics for split testing analysis
+    pub fn record_metrics(&mut self, metrics: SplitTestMetrics) {
+        // In a real implementation, this would store metrics to a database
+        // For now, we'll just validate the metrics structure
+        println!("Recording metrics for user {} variant {:?}: {:?}", 
+                metrics.user_id, metrics.variant, metrics.card_metrics);
+    }
+}
 
 #[derive(Deserialize, Serialize)]
 pub struct CustomArgs {
@@ -22,6 +226,12 @@ pub struct CustomArgs {
     /// # Exam Days
     /// What days will various tags be tested
     exam_days: Option<Vec<TagToDate>>,
+    /// # Split Testing Configuration
+    /// Configuration for A/B testing different algorithm parameters
+    split_test_config: Option<SplitTestConfig>,
+    /// # User ID for Split Testing
+    /// Unique identifier for consistent experiment assignment
+    user_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
